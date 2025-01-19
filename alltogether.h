@@ -40,7 +40,7 @@ struct BVHNode
 {
 	union { struct { float3 aabbMin; uint leftFirst; }; __m128 aabbMin4; };
 	union { struct { float3 aabbMax; uint triCount; }; __m128 aabbMax4; };
-	bool isLeaf() { return triCount > 0; }
+	bool isLeaf() const { return triCount > 0; }
 	float CalculateNodeCost()
 	{
 		float3 e = aabbMax - aabbMin; // extent of the node
@@ -63,8 +63,9 @@ private:
 	float FindBestSplitPlane( BVHNode& node, int& axis, float& splitPos );
 	Tri* tri = 0;
 	uint* triIdx = 0;
-	uint nodesUsed, triCount;
+	uint nodesUsed;
 public:
+	uint triCount;
 	BVHNode* bvhNode = 0;
 };
 
@@ -77,11 +78,20 @@ public:
 	void SetTransform( mat4& transform );
 	void Intersect( Ray& ray );
 private:
-	BVH* bvh = 0;
 	mat4 invTransform; // inverse transform
 public:
+	BVH* bvh = 0;
 	aabb bounds; // in world space
 };
+
+struct BRef
+{
+    BVHNode* ref;      // Reference to BVH node
+    aabb bounds;       // World-space bounding box
+    unsigned int objectID; // ID of the object/instance
+    unsigned int numPrims; // Number of primitives in the subtree
+};
+
 
 // top-level node
 struct TLASNode
@@ -100,7 +110,15 @@ public:
 	TLAS() = default;
 	TLAS( BVHInstance* bvhList, int N );
 	void Build();
-	void Intersect( Ray& ray );
+	void BuildWithBraiding();
+    int BuildRecursive(std::vector<BRef> &brefs, int start, int end, int nodeIndex);
+    bool ShouldOpenNode(const BRef &bref, int splitDim, float threshold) const;
+    void OpenNode(std::vector<BRef> &brefs, int idx);
+    unsigned int CountSubtreePrims(const BVHNode *node);
+    aabb ComputeChildWorldBounds(const BVHNode *child, const BRef &parentRef);
+    int PartitionBRefs(std::vector<BRef> &brefs, int start, int end);
+    void OpenNode();
+    void Intersect( Ray& ray );
 private:
 	int FindBestMatch( int* list, int N, int A );
 	TLASNode* tlasNode = 0;
