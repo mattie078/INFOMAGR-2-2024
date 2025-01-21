@@ -5,6 +5,9 @@
 
 // bin count
 #define BINS 8
+#define INSTANCE_AMOUNT 256
+
+#define MODEL_TRI_COUNT 30000
 
 namespace Tmpl8
 {
@@ -86,10 +89,10 @@ public:
 
 struct BRef
 {
-    BVHNode* ref;      // Reference to BVH node
+    BVHNode* ref = nullptr;
     aabb bounds;       // World-space bounding box
-    unsigned int objectID; // ID of the object/instance
-    unsigned int numPrims; // Number of primitives in the subtree
+    unsigned int objectID = -1;
+    unsigned int numPrims = 0;
 };
 
 

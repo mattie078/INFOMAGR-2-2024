@@ -313,7 +313,7 @@ int TLAS::FindBestMatch( int* list, int N, int A )
 void TLAS::Build()
 {
 	// assign a TLASleaf node to each BLAS
-	int nodeIdx[256], nodeIndices = blasCount;
+	int nodeIdx[INSTANCE_AMOUNT], nodeIndices = blasCount;
 	nodesUsed = 1;
 	for (uint i = 0; i < blasCount; i++)
 	{
@@ -486,8 +486,8 @@ bool TLAS::ShouldOpenNode(const BRef& bref, int splitDim, float threshold) const
 void TLAS::OpenNode(std::vector<BRef>& brefs, int idx)
 {
     // The BRef we’re about to open:
-    BRef& parentRef = brefs[idx];
-    BVHNode* node   = parentRef.ref;
+    BRef parentCopy = brefs[idx];
+    BVHNode* node   = parentCopy.ref;
 
     // If for some reason it's a leaf or invalid, do nothing:
     if (node->isLeaf()) return;
@@ -500,13 +500,13 @@ void TLAS::OpenNode(std::vector<BRef>& brefs, int idx)
     BRef leftBRef, rightBRef;
 
     leftBRef.ref      = leftChild;
-    leftBRef.bounds   = ComputeChildWorldBounds(leftChild, parentRef);
-    leftBRef.objectID = parentRef.objectID;
+    leftBRef.bounds   = ComputeChildWorldBounds(leftChild, parentCopy);
+    leftBRef.objectID = parentCopy.objectID;
     leftBRef.numPrims = CountSubtreePrims(leftChild);  // <-- here
 
     rightBRef.ref      = rightChild;
-    rightBRef.bounds   = ComputeChildWorldBounds(rightChild, parentRef);
-    rightBRef.objectID = parentRef.objectID;
+    rightBRef.bounds   = ComputeChildWorldBounds(rightChild, parentCopy);
+    rightBRef.objectID = parentCopy.objectID;
     rightBRef.numPrims = CountSubtreePrims(rightChild); // <-- here
 
     // Insert them into brefs.
@@ -523,28 +523,37 @@ void TLAS::OpenNode(std::vector<BRef>& brefs, int idx)
     //      But then you have to handle iteration carefully.
     //
     // For simplicity, let's just set numPrims=0 to ignore it, or store a sentinel:
-    parentRef.numPrims = 0;
-    parentRef.bounds   = aabb(); // or some invalid bounds
-    parentRef.ref      = nullptr;
+    // parentRef.numPrims = 0;
+    // parentRef.bounds   = aabb(); // or some invalid bounds
+    // parentRef.ref      = nullptr;
 }
 
 // In your TLAS class (or in a suitable place where BVHNode is visible):
 unsigned int TLAS::CountSubtreePrims(const BVHNode* node) 
 {
-	return 0;
 
-	if (node == nullptr) return 0;
+    if (node == nullptr) return 0;
 
-    // If node is leaf, the primitive count is simply node->triCount.
+    // if node is leaf, return its triCount
     if (node->isLeaf()) return node->triCount;
 
-    // Otherwise, sum the primitives in the left and right children.
-    // Here we assume the child nodes are at indices (node->leftFirst) and (node->leftFirst + 1)
-    // in the same bvhNode array (like in your original code).
+    // -- HACK: check that leftFirst+1 is still within the array
+    //    we allocated for the BLAS (N * 2). If out of range, 
+    //    just return this node's triCount or 0 to avoid a crash.
+    if (node->leftFirst + 1 >= MODEL_TRI_COUNT)
+    {
+        // fallback: treat it like a leaf or skip it entirely
+        // so we don't dereference invalid pointers
+        return node->triCount;
+        // or 'return 0;' if you prefer
+    }
+
+    // If it's in range, proceed as normal
     const BVHNode* leftChild  = &node[node->leftFirst];
     const BVHNode* rightChild = &node[node->leftFirst + 1];
     return CountSubtreePrims(leftChild) + CountSubtreePrims(rightChild);
 }
+
 
 
 aabb TLAS::ComputeChildWorldBounds(const BVHNode* child, const BRef& parentRef)
@@ -706,27 +715,29 @@ void TLAS::Intersect( Ray& ray )
 
 void AllTogetherApp::Init()
 {
-	BVH* bvh = new BVH( "assets/armadillo.tri", 30000 );
-	for (int i = 0; i < 256; i++)
+	BVH* bvh = new BVH( "assets/armadillo.tri", MODEL_TRI_COUNT );
+	for (int i = 0; i < INSTANCE_AMOUNT; i++)
 		bvhInstance[i] = BVHInstance( bvh );
-	tlas = TLAS( bvhInstance, 256 );
-	// set up spacy armadillo army
-	position = new float3[256];
-	direction = new float3[256];
-	orientation = new float3[256];
-	for( int i = 0; i < 256; i++ )
+	tlas = TLAS( bvhInstance, INSTANCE_AMOUNT );
+
+	position = new float3[INSTANCE_AMOUNT];
+	direction = new float3[INSTANCE_AMOUNT];
+	orientation = new float3[INSTANCE_AMOUNT];
+	float scaleFactor = 0.2f; 
+	for( int i = 0; i < INSTANCE_AMOUNT; i++ )
 	{
 		position[i] = float3( RandomFloat(), RandomFloat(), RandomFloat() ) - 0.5f;
 		position[i] *= 4;
 		direction[i] = normalize( position[i] ) * 0.05f;
 		orientation[i] = float3( RandomFloat(), RandomFloat(), RandomFloat() ) * 2.5f;
+		bvhInstance[i].SetTransform( mat4::Scale( scaleFactor ) ); 
 	}
 }
 
 void AllTogetherApp::Tick( float deltaTime )
 {
 	// animate the scene
-	for( int i = 0; i < 256; i++ )
+	for( int i = 0; i < INSTANCE_AMOUNT; i++ )
 	{
 		mat4 R = mat4::RotateX( orientation[i].x ) * 
 				 mat4::RotateY( orientation[i].y ) *
