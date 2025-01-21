@@ -679,6 +679,55 @@ int TLAS::PartitionBRefs(std::vector<BRef>& brefs, int start, int end)
     return i;
 }
 
+float BVH::ComputeSAH()
+{
+    // sum SAH over all nodes in bvhNode[] array
+    float sah = 0;
+    for (int i = 0; i < nodesUsed; i++)
+    {
+        BVHNode& n = bvhNode[i];
+        // compute surface area
+        float3 e = n.aabbMax - n.aabbMin; // box extent
+        float surfaceArea = (e.x * e.y + e.y * e.z + e.z * e.x) * 2.0f; 
+        // for a leaf, multiply by triCount; for an internal node, multiply by 2 or 1
+        // (depending on how you prefer to define internal SAH).
+        if (n.isLeaf())
+        {
+            sah += surfaceArea * n.triCount; 
+        }
+        else
+        {
+            // simplest approach: multiply by some childCount
+            // or you might skip internal nodes if you only care about leaves.
+            sah += surfaceArea * 2.0f; 
+        }
+    }
+    return sah;
+}
+
+
+float TLAS::ComputeSAH()
+{
+    float sah = 0;
+    for (int i = 0; i < nodesUsed; i++)
+    {
+        TLASNode& n = tlasNode[i];
+        float3 e = n.aabbMax - n.aabbMin;
+        float surfaceArea = (e.x * e.y + e.y * e.z + e.z * e.x) * 2.0f;
+        if (n.isLeaf())
+        {
+            // leaf => one BLAS reference
+            // or multiply by the BLAS’s triangle count if you prefer
+            sah += surfaceArea * 1.0f;
+        }
+        else
+        {
+            // internal => typically 2 children
+            sah += surfaceArea * 2.0f;
+        }
+    }
+    return sah;
+}
 
 
 void TLAS::Intersect( Ray& ray )
@@ -715,80 +764,126 @@ void TLAS::Intersect( Ray& ray )
 
 void AllTogetherApp::Init()
 {
-	BVH* bvh = new BVH( "assets/armadillo.tri", MODEL_TRI_COUNT );
-	for (int i = 0; i < INSTANCE_AMOUNT; i++)
-		bvhInstance[i] = BVHInstance( bvh );
-	tlas = TLAS( bvhInstance, INSTANCE_AMOUNT );
+    // 1) Open the performance log file for writing:
+    perfFile = fopen("performance.txt", "w");
+    if (!perfFile)
+    {
+        printf("ERROR: Could not open performance.txt for writing!\n");
+        exit(1);
+    }
 
-	position = new float3[INSTANCE_AMOUNT];
-	direction = new float3[INSTANCE_AMOUNT];
-	orientation = new float3[INSTANCE_AMOUNT];
+    // 2) Time the BLAS build, as before
+    Timer buildTimer;
+    BVH* bvh = new BVH("assets/armadillo.tri", MODEL_TRI_COUNT);
+    float buildTimeMs = buildTimer.elapsed() * 1000.0f;
 
-	uint seed = 42;
+    float buildTimeS = buildTimeMs * 0.001f;
+    float Mprim = (MODEL_TRI_COUNT) / (buildTimeS * 1e6f);
+    float bvhSAH = bvh->ComputeSAH(); // your new SAH function
 
-	for( int i = 0; i < INSTANCE_AMOUNT; i++ )
-	{
-		position[i] = float3( RandomFloat(seed), RandomFloat(seed), RandomFloat(seed) ) - 0.5f;
-		position[i] *= 4;
-		direction[i] = normalize( position[i] ) * 0.05f;
-		orientation[i] = float3( RandomFloat(seed), RandomFloat(seed), RandomFloat(seed) ) * 2.5f;
-	}
+    // 3) Log build data to both console and perfFile
+    printf("[Init] BLAS build time = %.2f ms (%.2f Mprim/s)\n", buildTimeMs, Mprim);
+    printf("[Init] BLAS total SAH  = %.1f\n", bvhSAH);
+
+    fprintf(perfFile, "Initial BLAS build time: %.2f ms (%.2f Mprim/s)\n", buildTimeMs, Mprim);
+    fprintf(perfFile, "Initial BLAS total SAH: %.1f\n\n", bvhSAH);
+    fflush(perfFile); // optional flush
+
+    // 4) Create the BLAS instances
+    for (int i = 0; i < INSTANCE_AMOUNT; i++)
+        bvhInstance[i] = BVHInstance(bvh);
+
+    // 5) Create the TLAS
+    tlas = TLAS(bvhInstance, INSTANCE_AMOUNT);
+
+    // 6) Prepare random positions, directions, etc. (same as before)
+    position = new float3[INSTANCE_AMOUNT];
+    direction = new float3[INSTANCE_AMOUNT];
+    orientation = new float3[INSTANCE_AMOUNT];
+    uint seed = 42;
+    for (int i = 0; i < INSTANCE_AMOUNT; i++)
+    {
+        position[i] = float3(RandomFloat(seed), RandomFloat(seed), RandomFloat(seed)) - 0.5f;
+        position[i] *= 4.0f;
+        direction[i] = normalize(position[i]) * 0.05f;
+        orientation[i] = float3(RandomFloat(seed), RandomFloat(seed), RandomFloat(seed)) * 2.5f;
+    }
 }
 
-void AllTogetherApp::Tick( float deltaTime )
+
+
+void AllTogetherApp::Tick(float deltaTime)
 {
-	static Timer timer;
-	static float elapsedTime = 0;
-	static int frameCount = 0;
-	static FILE* file = fopen("performance.txt", "w");
+    static Timer globalTimer; // still fine to keep track of total run-time
+    static float elapsedTime = 0;
+    static int   frameCount = 0;
 
-	// animate the scene
-	for( int i = 0; i < INSTANCE_AMOUNT; i++ )
-	{
-		mat4 R = mat4::RotateX( orientation[i].x ) * 
-				 mat4::RotateY( orientation[i].y ) *
-				 mat4::RotateZ( orientation[i].z ) * mat4::Scale( SCALING );
-		bvhInstance[i].SetTransform( mat4::Translate( position[i] ) * R );
-		position[i] += direction[i], orientation[i] += direction[i];
-		if (position[i].x < -3 || position[i].x > 3) direction[i].x *= -1;
-		if (position[i].y < -3 || position[i].y > 3) direction[i].y *= -1;
-		if (position[i].z < -3 || position[i].z > 3) direction[i].z *= -1;
-	}
-	// update the TLAS
-	Timer t;
+    // 1) Animate the scene
+    for (int i = 0; i < INSTANCE_AMOUNT; i++)
+    {
+        mat4 R = mat4::RotateX(orientation[i].x) *
+                 mat4::RotateY(orientation[i].y) *
+                 mat4::RotateZ(orientation[i].z) *
+                 mat4::Scale(SCALING);
+        bvhInstance[i].SetTransform(mat4::Translate(position[i]) * R);
+        position[i] += direction[i];
+        orientation[i] += direction[i];
+        if (position[i].x < -3 || position[i].x > 3) direction[i].x *= -1;
+        if (position[i].y < -3 || position[i].y > 3) direction[i].y *= -1;
+        if (position[i].z < -3 || position[i].z > 3) direction[i].z *= -1;
+    }
+
+    // 2) Build / Rebuild TLAS
+    Timer t;
 	// tlas.Build();
-	tlas.BuildWithBraiding();
-	float tlasTime = t.elapsed() * 1000;
-	// draw the scene
-	float3 p0( -1, 1, 2 ), p1( 1, 1, 2 ), p2( -1, -1, 2 );
-#pragma omp parallel for schedule(dynamic)
-	for (int tile = 0; tile < (SCRWIDTH * SCRHEIGHT / 64); tile++)
-	{
-		int x = tile % (SCRWIDTH / 8), y = tile / (SCRWIDTH / 8);
-		Ray ray;
-		ray.O = float3( 0, 0, -6.5f );
-		for (int v = 0; v < 8; v++) for (int u = 0; u < 8; u++)
-		{
-			float3 pixelPos = ray.O + p0 +
-				(p1 - p0) * ((x * 8 + u) / (float)SCRWIDTH) +
-				(p2 - p0) * ((y * 8 + v) / (float)SCRHEIGHT);
-			ray.D = normalize( pixelPos - ray.O ), ray.t = 1e30f;
-			tlas.Intersect( ray );
-			uint c = ray.t < 1e30f ? (int)(255 / (1 + max( 0.f, ray.t - 4 ))) : 0;
-			screen->Plot( x * 8 + u, y * 8 + v, c * 0x10101 );
-		}
-	}
-	// report
-	float elapsed = t.elapsed() * 1000;
-	elapsedTime += elapsed;
-	frameCount++;
-	fprintf(file, "Frame %d: tlas build: %.2fms, tracing time: %.2fms (%5.2fK rays/s)\n", frameCount, tlasTime, elapsed, sqr( 630 ) / elapsed);
+    tlas.BuildWithBraiding();
+    float tlasTime = t.elapsed() * 1000.0f;
+    float tlasSAH = tlas.ComputeSAH(); // optional
 
-	if (elapsedTime >= 30000) // 10 seconds
-	{
-		fclose(file);
-		exit(0);
-	}
+    // 3) Ray tracing
+    Timer renderTimer;
+    float3 p0(-1, 1, 2), p1(1, 1, 2), p2(-1, -1, 2);
+#pragma omp parallel for schedule(dynamic)
+    for (int tile = 0; tile < (SCRWIDTH * SCRHEIGHT / 64); tile++)
+    {
+        int x = tile % (SCRWIDTH / 8);
+        int y = tile / (SCRWIDTH / 8);
+        Ray ray;
+        ray.O = float3(0, 0, -6.5f);
+        for (int v = 0; v < 8; v++)
+        for (int u = 0; u < 8; u++)
+        {
+            float3 pixelPos = ray.O + p0
+                + (p1 - p0) * ((x * 8 + u) / (float)SCRWIDTH)
+                + (p2 - p0) * ((y * 8 + v) / (float)SCRHEIGHT);
+            ray.D = normalize(pixelPos - ray.O);
+            ray.t = 1e30f;
+            tlas.Intersect(ray);
+            uint c = ray.t < 1e30f ? (int)(255 / (1 + max(0.f, ray.t - 4))) : 0;
+            screen->Plot(x * 8 + u, y * 8 + v, c * 0x10101);
+        }
+    }
+    float renderTimeMs = renderTimer.elapsed() * 1000.0f;
+
+    // 4) Log stats for this frame
+    elapsedTime += renderTimeMs;
+    frameCount++;
+
+    float totalFrameTime = tlasTime + renderTimeMs; // build + rendering
+    float fps = (1000.0f / totalFrameTime);         // simplistic, ignoring partial frames
+    float kraysSec = (SCRWIDTH * SCRHEIGHT * 1e-3f) / (renderTimeMs * 1e-3f);
+
+    fprintf(perfFile,
+        "Frame %d: TLAS build = %.2f ms, SAH=%.1f, Rendering=%.2f ms, Total=%.2f ms, "
+        "FPS=%.2f, (%.2fK rays/s)\n",
+        frameCount, tlasTime, tlasSAH, renderTimeMs, totalFrameTime, fps, kraysSec);
+
+    // 5) Quit after 30s
+    if (globalTimer.elapsed() > 30.0f)
+    {
+        fclose(perfFile); // close the file
+        exit(0);
+    }
 }
 
 // EOF

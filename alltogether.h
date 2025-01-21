@@ -63,12 +63,13 @@ public:
 	void Intersect( Ray& ray );
 private:
 	void Subdivide( uint nodeIdx );
-	void UpdateNodeBounds( uint nodeIdx );
-	float FindBestSplitPlane( BVHNode& node, int& axis, float& splitPos );
+    void UpdateNodeBounds(uint nodeIdx);
+    float FindBestSplitPlane( BVHNode& node, int& axis, float& splitPos );
 	Tri* tri = 0;
 	uint* triIdx = 0;
 	uint nodesUsed;
 public:
+    float ComputeSAH();
 	uint triCount;
 	BVHNode* bvhNode = 0;
 };
@@ -121,6 +122,7 @@ public:
     unsigned int CountSubtreePrims(const BVHNode *node);
     aabb ComputeChildWorldBounds(const BVHNode *child, const BRef &parentRef);
     int PartitionBRefs(std::vector<BRef> &brefs, int start, int end);
+    float ComputeSAH();
     void OpenNode();
     void Intersect( Ray& ray );
 private:
@@ -150,6 +152,9 @@ public:
 	BVHInstance bvhInstance[INSTANCE_AMOUNT];
 	TLAS tlas;
 	float3* position, *direction, *orientation;
+
+private:
+    FILE* perfFile = nullptr;
 };
 
 } // namespace Tmpl8
