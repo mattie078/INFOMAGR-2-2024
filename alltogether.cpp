@@ -723,25 +723,31 @@ void AllTogetherApp::Init()
 	position = new float3[INSTANCE_AMOUNT];
 	direction = new float3[INSTANCE_AMOUNT];
 	orientation = new float3[INSTANCE_AMOUNT];
-	float scaleFactor = 0.2f; 
+
+	uint seed = 42;
+
 	for( int i = 0; i < INSTANCE_AMOUNT; i++ )
 	{
-		position[i] = float3( RandomFloat(), RandomFloat(), RandomFloat() ) - 0.5f;
+		position[i] = float3( RandomFloat(seed), RandomFloat(seed), RandomFloat(seed) ) - 0.5f;
 		position[i] *= 4;
 		direction[i] = normalize( position[i] ) * 0.05f;
-		orientation[i] = float3( RandomFloat(), RandomFloat(), RandomFloat() ) * 2.5f;
-		bvhInstance[i].SetTransform( mat4::Scale( scaleFactor ) ); 
+		orientation[i] = float3( RandomFloat(seed), RandomFloat(seed), RandomFloat(seed) ) * 2.5f;
 	}
 }
 
 void AllTogetherApp::Tick( float deltaTime )
 {
+	static Timer timer;
+	static float elapsedTime = 0;
+	static int frameCount = 0;
+	static FILE* file = fopen("performance.txt", "w");
+
 	// animate the scene
 	for( int i = 0; i < INSTANCE_AMOUNT; i++ )
 	{
 		mat4 R = mat4::RotateX( orientation[i].x ) * 
 				 mat4::RotateY( orientation[i].y ) *
-				 mat4::RotateZ( orientation[i].z ) * mat4::Scale( 0.2f );
+				 mat4::RotateZ( orientation[i].z ) * mat4::Scale( SCALING );
 		bvhInstance[i].SetTransform( mat4::Translate( position[i] ) * R );
 		position[i] += direction[i], orientation[i] += direction[i];
 		if (position[i].x < -3 || position[i].x > 3) direction[i].x *= -1;
@@ -774,7 +780,15 @@ void AllTogetherApp::Tick( float deltaTime )
 	}
 	// report
 	float elapsed = t.elapsed() * 1000;
-	printf( "tlas build: %.2fms, tracing time: %.2fms (%5.2fK rays/s)\n", tlasTime, elapsed, sqr( 630 ) / elapsed );
+	elapsedTime += elapsed;
+	frameCount++;
+	fprintf(file, "Frame %d: tlas build: %.2fms, tracing time: %.2fms (%5.2fK rays/s)\n", frameCount, tlasTime, elapsed, sqr( 630 ) / elapsed);
+
+	if (elapsedTime >= 30000) // 10 seconds
+	{
+		fclose(file);
+		exit(0);
+	}
 }
 
 // EOF

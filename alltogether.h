@@ -5,7 +5,8 @@
 
 // bin count
 #define BINS 8
-#define INSTANCE_AMOUNT 256
+#define INSTANCE_AMOUNT 512
+#define SCALING 0.25f
 
 #define MODEL_TRI_COUNT 30000
 
@@ -146,7 +147,7 @@ public:
 	void KeyDown( int key ) { /* implement if you want to handle keys */ }
 	// data members
 	int2 mousePos;
-	BVHInstance bvhInstance[256];
+	BVHInstance bvhInstance[INSTANCE_AMOUNT];
 	TLAS tlas;
 	float3* position, *direction, *orientation;
 };
