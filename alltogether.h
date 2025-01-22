@@ -92,7 +92,7 @@ public:
 struct BRef
 {
     BVHNode* ref = nullptr;
-    aabb bounds;       // World-space bounding box
+    aabb bounds;
     unsigned int objectID = -1;
     unsigned int numPrims = 0;
 };
