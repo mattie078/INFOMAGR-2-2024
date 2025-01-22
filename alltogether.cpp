@@ -420,28 +420,23 @@ int TLAS::BuildRecursive(std::vector<BRef>& brefs, int start, int end, int nodeI
         OpenNode(brefs, idx);
     }
 
-    // 5) Now that we've opened whatever we wanted, partition this segment.
-    //    That means we find a best axis/plane via SAH binning, then rearrange
-    //    [start..end) so that references < plane go left, >= plane go right.
-    //    We'll get a 'mid' index out of it.
+    // Find a best axis via SAH binning, then rearrange
     int mid = PartitionBRefs(brefs, start, end);
 
-    // 6) Store the bounding box in tlasNode[nodeIndex].
+    // Store the node's AABB so we can use it in the parent node
     TLASNode& node = tlasNode[nodeIndex];
     node.aabbMin = segBMin;
     node.aabbMax = segBMax;
 
-    // 7) Create two child indices in the TLAS array. We'll store them in the
-    //    16-bit halves of 'leftRight' as in your code. Then we recursively build them.
+    // Idk why we store the left and right children this way, but it's original code
     int leftChildIndex  = nodesUsed++;
     int rightChildIndex = nodesUsed++;
     node.leftRight = (leftChildIndex & 0xffff) | (rightChildIndex << 16);
 
-    // Recurse:
+    // Recurse on the left and right children
     BuildRecursive(brefs, start, mid, leftChildIndex);
     BuildRecursive(brefs, mid,   end, rightChildIndex);
 
-    // Return index of this node (optionally).
     return nodeIndex;
 }
 
