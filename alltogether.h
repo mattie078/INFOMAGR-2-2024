@@ -5,6 +5,10 @@
 
 // bin count
 #define BINS 8
+#define INSTANCE_AMOUNT 512
+#define MODEL_TRI_COUNT 30000
+#define SCALING 0.25f
+#define RUN_TIME 30.0f // seconds
 
 namespace Tmpl8
 {
@@ -40,7 +44,7 @@ struct BVHNode
 {
 	union { struct { float3 aabbMin; uint leftFirst; }; __m128 aabbMin4; };
 	union { struct { float3 aabbMax; uint triCount; }; __m128 aabbMax4; };
-	bool isLeaf() { return triCount > 0; }
+	bool isLeaf() const { return triCount > 0; }
 	float CalculateNodeCost()
 	{
 		float3 e = aabbMax - aabbMin; // extent of the node
@@ -59,12 +63,14 @@ public:
 	void Intersect( Ray& ray );
 private:
 	void Subdivide( uint nodeIdx );
-	void UpdateNodeBounds( uint nodeIdx );
-	float FindBestSplitPlane( BVHNode& node, int& axis, float& splitPos );
+    void UpdateNodeBounds(uint nodeIdx);
+    float FindBestSplitPlane( BVHNode& node, int& axis, float& splitPos );
 	Tri* tri = 0;
 	uint* triIdx = 0;
-	uint nodesUsed, triCount;
+	uint nodesUsed;
 public:
+    float ComputeSAH();
+	uint triCount;
 	BVHNode* bvhNode = 0;
 };
 
@@ -77,11 +83,20 @@ public:
 	void SetTransform( mat4& transform );
 	void Intersect( Ray& ray );
 private:
-	BVH* bvh = 0;
 	mat4 invTransform; // inverse transform
 public:
+	BVH* bvh = 0;
 	aabb bounds; // in world space
 };
+
+struct BRef
+{
+    BVHNode* ref = nullptr;
+    aabb bounds;
+    unsigned int objectID = -1;
+    unsigned int numPrims = 0;
+};
+
 
 // top-level node
 struct TLASNode
@@ -100,7 +115,16 @@ public:
 	TLAS() = default;
 	TLAS( BVHInstance* bvhList, int N );
 	void Build();
-	void Intersect( Ray& ray );
+	void BuildWithBraiding();
+    int BuildRecursive(std::vector<BRef> &brefs, int start, int end, int nodeIndex);
+    bool ShouldOpenNode(const BRef &bref, int splitDim, float threshold) const;
+    void OpenNode(std::vector<BRef> &brefs, int idx);
+    unsigned int CountSubtreePrims(const BVHNode *node);
+    aabb ComputeChildWorldBounds(const BVHNode *child, const BRef &parentRef);
+    int PartitionBRefs(std::vector<BRef> &brefs, int start, int end);
+    float ComputeSAH();
+    void OpenNode();
+    void Intersect( Ray& ray );
 private:
 	int FindBestMatch( int* list, int N, int A );
 	TLASNode* tlasNode = 0;
@@ -125,9 +149,12 @@ public:
 	void KeyDown( int key ) { /* implement if you want to handle keys */ }
 	// data members
 	int2 mousePos;
-	BVHInstance bvhInstance[256];
+	BVHInstance bvhInstance[INSTANCE_AMOUNT];
 	TLAS tlas;
 	float3* position, *direction, *orientation;
+
+private:
+    FILE* perfFile = nullptr;
 };
 
 } // namespace Tmpl8

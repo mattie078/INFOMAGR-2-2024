@@ -313,7 +313,7 @@ int TLAS::FindBestMatch( int* list, int N, int A )
 void TLAS::Build()
 {
 	// assign a TLASleaf node to each BLAS
-	int nodeIdx[256], nodeIndices = blasCount;
+	int nodeIdx[INSTANCE_AMOUNT], nodeIndices = blasCount;
 	nodesUsed = 1;
 	for (uint i = 0; i < blasCount; i++)
 	{
@@ -346,6 +346,337 @@ void TLAS::Build()
 	tlasNode[0] = tlasNode[nodeIdx[A]];
 }
 
+void TLAS::BuildWithBraiding()
+{
+    std::vector<BRef> brefs;
+    brefs.reserve(blasCount);
+
+    for (int i = 0; i < blasCount; i++)
+    {
+        BRef bref;
+        bref.ref       = &blas[i].bvh->bvhNode[0]; 
+        bref.bounds    = blas[i].bounds;           
+        bref.objectID  = i;
+        bref.numPrims  = blas[i].bvh->triCount;    
+        brefs.push_back(bref);
+    }
+
+    nodesUsed = 1; // the root is in tlasNode[0]
+
+    BuildRecursive(brefs, 0, (int)brefs.size(), 0);
+}
+
+// Determine the dimension with the largest value for the split
+inline int MaxDimension(const float3& v)
+{
+    if (v.x > v.y && v.x > v.z) return 0; // x is the largest
+    if (v.y > v.z) return 1;              // y is the largest
+    return 2;                             // z is the largest
+}
+
+
+int TLAS::BuildRecursive(std::vector<BRef>& brefs, int start, int end, int nodeIndex)
+{
+    // Termination checks
+    const int count = end - start;
+    if (count <= 0) return nodeIndex;
+    if (count == 1)
+    {
+        // Exactly one BRef => this is a leaf in TLAS
+        TLASNode& leaf = tlasNode[nodeIndex];
+        leaf.aabbMin = brefs[start].bounds.bmin;
+        leaf.aabbMax = brefs[start].bounds.bmax;
+        leaf.BLAS = brefs[start].objectID;
+        leaf.leftRight = 0;  // signals that this is a leaf
+        return nodeIndex;
+    }
+
+    // Calculate bounding box of this BRef
+    float3 segBMin(1e30f), segBMax(-1e30f);
+    for (int i = start; i < end; i++)
+    {
+        segBMin = fminf(segBMin, brefs[i].bounds.bmin);
+        segBMax = fmaxf(segBMax, brefs[i].bounds.bmax);
+    }
+
+    // Decide which BRefs to open in this segment
+    // Use 10% as threshold for now like in the paper
+    std::vector<int> openList;
+    const float3 segExtent = segBMax - segBMin;
+    const int    splitDim  = MaxDimension(segExtent); 
+	const float  threshold = 0.1f * (splitDim == 0 ? segExtent.x : (splitDim == 1 ? segExtent.y : segExtent.z));  
+
+    for (int i = start; i < end; i++)
+    {
+        if (ShouldOpenNode(brefs[i], splitDim, threshold))
+        {
+            openList.push_back(i);
+        }
+    }
+
+    // Open up the BRefs by creating new ones for their children and inserting them into the array
+    for (int idx : openList)
+    {
+        OpenNode(brefs, idx);
+    }
+
+    // Find a best axis via SAH binning, then rearrange
+    int mid = PartitionBRefs(brefs, start, end);
+
+    // Store the node's AABB so we can use it in the parent node
+    TLASNode& node = tlasNode[nodeIndex];
+    node.aabbMin = segBMin;
+    node.aabbMax = segBMax;
+
+    // Idk why we store the left and right children this way, but it's original code
+    int leftChildIndex  = nodesUsed++;
+    int rightChildIndex = nodesUsed++;
+    node.leftRight = (leftChildIndex & 0xffff) | (rightChildIndex << 16);
+
+    // Recurse on the left and right children
+    BuildRecursive(brefs, start, mid, leftChildIndex);
+    BuildRecursive(brefs, mid,   end, rightChildIndex);
+
+    return nodeIndex;
+}
+
+bool TLAS::ShouldOpenNode(const BRef& bref, int splitDim, float threshold) const
+{
+	if (bref.ref == nullptr) return false; 
+
+    // If already a leaf in the object, can't open then
+    if (bref.ref->isLeaf()) return false;
+
+    // Check bounding box extent in 'splitDim'
+	const float boxExtent = (splitDim == 0) ? (bref.bounds.bmax.x - bref.bounds.bmin.x) :
+						   (splitDim == 1) ? (bref.bounds.bmax.y - bref.bounds.bmin.y) :
+											 (bref.bounds.bmax.z - bref.bounds.bmin.z);
+
+    // If the subtree's bounding box is larger than the threshold, open it
+    return (boxExtent > threshold);
+}
+
+
+void TLAS::OpenNode(std::vector<BRef>& brefs, int idx)
+{
+    // Make a copy so we dont dereference the original BRef
+    BRef parentCopy = brefs[idx];
+    BVHNode* node   = parentCopy.ref;
+
+    // If for some reason it a leaf, we can't open it
+    if (node->isLeaf()) return;
+
+    // Get the children
+	BVHNode* leftChild  = &node[node->leftFirst];
+	BVHNode* rightChild = &node[node->leftFirst + 1];
+
+    // Create new BRefs for these children and add them
+    BRef leftBRef, rightBRef;
+
+    leftBRef.ref      = leftChild;
+    leftBRef.bounds   = ComputeChildWorldBounds(leftChild, parentCopy);
+    leftBRef.objectID = parentCopy.objectID;
+    leftBRef.numPrims = CountSubtreePrims(leftChild);
+
+    rightBRef.ref      = rightChild;
+    rightBRef.bounds   = ComputeChildWorldBounds(rightChild, parentCopy);
+    rightBRef.objectID = parentCopy.objectID;
+    rightBRef.numPrims = CountSubtreePrims(rightChild);
+
+    brefs.push_back(leftBRef);
+    brefs.push_back(rightBRef);
+}
+
+// Recursively count the number of primitives in the subtree
+unsigned int TLAS::CountSubtreePrims(const BVHNode* node) 
+{
+    if (node == nullptr) return 0;
+
+    // If node is leaf, return its triCount
+    if (node->isLeaf()) return node->triCount;
+
+    // Hacky way to check if we're somehow at the end of the array, treat as leaf
+    if (node->leftFirst + 1 >= MODEL_TRI_COUNT) return node->triCount;
+    
+    const BVHNode* leftChild  = &node[node->leftFirst];
+    const BVHNode* rightChild = &node[node->leftFirst + 1];
+    return CountSubtreePrims(leftChild) + CountSubtreePrims(rightChild);
+}
+
+aabb TLAS::ComputeChildWorldBounds(const BVHNode* child, const BRef& parentRef)
+{
+	aabb bounds;
+	bounds.grow(child->aabbMin);
+	bounds.grow(child->aabbMax);
+	return bounds;
+}
+
+// SAH partitioning of BRefs
+// Mostly copied from embree (papers source)
+int TLAS::PartitionBRefs(std::vector<BRef>& brefs, int start, int end)
+{
+    if (end - start <= 1) return (start + end) >> 1;
+
+    // Compute centroid bounds
+    float3 cbmin(1e30f), cbmax(-1e30f);
+    for (int i = start; i < end; i++)
+    {
+        float3 c = 0.5f * (brefs[i].bounds.bmin + brefs[i].bounds.bmax);
+        cbmin = fminf(cbmin, c);
+        cbmax = fmaxf(cbmax, c);
+    }
+    float3 diag = cbmax - cbmin;
+    if (diag.x < 1e-6f && diag.y < 1e-6f && diag.z < 1e-6f)
+    {
+        // All centroids are nearly the same, just mid-split
+        return (start + end) >> 1;
+    }
+
+    // Pick axis with greatest extent
+    int axis = 0;
+    if (diag.y > diag.x) axis = 1;
+    if (diag.z > diag[axis]) axis = 2;
+
+    // Binning along that axis
+    float minC = cbmin[axis], maxC = cbmax[axis];
+    float extent = maxC - minC;
+    if (extent < 1e-6f) return (start + end) >> 1;
+
+    aabb binBounds[BINS];
+    int binCount[BINS];
+    int binPrims[BINS];
+    // Initialize bins
+    for (int b = 0; b < BINS; b++)
+    {
+        binBounds[b] = aabb();
+        binCount[b]  = 0;
+        binPrims[b]  = 0;
+    }
+
+    // Fill bins
+    float scale = float(BINS) / extent;
+    for (int i = start; i < end; i++)
+    {
+        float3 c = 0.5f * (brefs[i].bounds.bmin + brefs[i].bounds.bmax);
+        int b = int((c[axis] - minC) * scale);
+        if (b < 0) b = 0;
+        if (b >= BINS) b = BINS - 1;
+        binCount[b]++;
+        binPrims[b] += brefs[i].numPrims;
+        binBounds[b].grow(brefs[i].bounds.bmin);
+        binBounds[b].grow(brefs[i].bounds.bmax);
+    }
+
+    // Prefix sums from the left
+    float leftArea[BINS], rightArea[BINS];
+    int   leftCount[BINS], rightCount[BINS];
+    int   leftPrims[BINS], rightPrims[BINS];
+
+    // Sweep from left to right
+    aabb current;
+    int countAccum = 0, primsAccum = 0;
+    for (int b = 0; b < BINS; b++)
+    {
+        current.grow(binBounds[b].bmin);
+        current.grow(binBounds[b].bmax);
+        countAccum += binCount[b];
+        primsAccum += binPrims[b];
+        leftArea[b]  = current.area();
+        leftCount[b] = countAccum;
+        leftPrims[b] = primsAccum;
+    }
+
+    // Suffix sums from the right
+    current = aabb();
+    countAccum = 0;
+    primsAccum = 0;
+    for (int b = BINS - 1; b >= 0; b--)
+    {
+        current.grow(binBounds[b].bmin);
+        current.grow(binBounds[b].bmax);
+        countAccum += binCount[b];
+        primsAccum += binPrims[b];
+        rightArea[b]  = current.area();
+        rightCount[b] = countAccum;
+        rightPrims[b] = primsAccum;
+    }
+
+    // Find best split
+    float bestCost = 1e30f;
+    int   bestSplit = -1;
+    for (int s = 0; s < BINS - 1; s++)
+    {
+        float cost = leftArea[s] * leftPrims[s] + rightArea[s + 1] * rightPrims[s + 1];
+        if (cost < bestCost)
+        {
+            bestCost  = cost;
+            bestSplit = s;
+        }
+    }
+    if (bestSplit < 0) return (start + end) >> 1;
+
+    // Partition in-place
+    float splitPos = minC + float(bestSplit + 1) / scale;
+    int i = start, j = end - 1;
+    while (i <= j)
+    {
+        float3 c = 0.5f * (brefs[i].bounds.bmin + brefs[i].bounds.bmax);
+        if (c[axis] < splitPos) i++;
+        else
+        {
+            std::swap(brefs[i], brefs[j]); // Swap the BRefs around the split
+            j--;
+        }
+    }
+
+    // If one side is somehow empty, do fallback to mid-split
+    if (i == start || i == end) return (start + end) >> 1; 
+
+    return i;
+}
+
+// Yes I could have used a Template version of this function, but I wanted to keep it simple :d
+// sum SAH over all nodes in array
+float BVH::ComputeSAH()
+{
+    float sah = 0;
+    for (int i = 0; i < nodesUsed; i++)
+    {
+        BVHNode& node = bvhNode[i];
+        float3 extend = node.aabbMax - node.aabbMin;
+        float surfaceArea = (extend.x * extend.y + extend.y * extend.z + extend.z * extend.x) * 2.0f; 
+        if (node.isLeaf())
+        {
+            sah += surfaceArea * node.triCount; 
+        }
+        else
+        {
+            sah += surfaceArea * 2.0f; 
+        }
+    }
+    return sah;
+}
+
+float TLAS::ComputeSAH()
+{
+    float sah = 0;
+    for (int i = 0; i < nodesUsed; i++)
+    {
+        TLASNode& node = tlasNode[i];
+        float3 extend = node.aabbMax - node.aabbMin;
+        float surfaceArea = (extend.x * extend.y + extend.y * extend.z + extend.z * extend.x) * 2.0f;
+        if (node.isLeaf())
+        {
+            sah += surfaceArea * blas[node.BLAS].bvh->triCount;
+        }
+        else
+        {
+            sah += surfaceArea * 2.0f;
+        }
+    }
+    return sah;
+}
+
 void TLAS::Intersect( Ray& ray )
 {
 	ray.rD = float3( 1 / ray.D.x, 1 / ray.D.y, 1 / ray.D.z );
@@ -376,67 +707,120 @@ void TLAS::Intersect( Ray& ray )
 	}
 }
 
-// AllTogetherApp implementation
-
 void AllTogetherApp::Init()
 {
-	BVH* bvh = new BVH( "assets/armadillo.tri", 30000 );
-	for (int i = 0; i < 256; i++)
-		bvhInstance[i] = BVHInstance( bvh );
-	tlas = TLAS( bvhInstance, 256 );
-	// set up spacy armadillo army
-	position = new float3[256];
-	direction = new float3[256];
-	orientation = new float3[256];
-	for( int i = 0; i < 256; i++ )
-	{
-		position[i] = float3( RandomFloat(), RandomFloat(), RandomFloat() ) - 0.5f;
-		position[i] *= 4;
-		direction[i] = normalize( position[i] ) * 0.05f;
-		orientation[i] = float3( RandomFloat(), RandomFloat(), RandomFloat() ) * 2.5f;
-	}
+    perfFile = fopen("performance.txt", "w");
+    if (!perfFile)
+    {
+        printf("ERROR: Could not open performance.txt for writing!\n");
+        exit(1);
+    }
+
+    Timer buildTimer;
+    BVH* bvh = new BVH("assets/armadillo.tri", MODEL_TRI_COUNT);
+    float buildTimeMs = buildTimer.elapsed() * 1000.0f;
+
+    float buildTimeS = buildTimeMs * 0.001f;
+    float Mprim = (MODEL_TRI_COUNT) / (buildTimeS * 1e6f);
+    float bvhSAH = bvh->ComputeSAH(); 
+
+    printf("[Init] BLAS build time = %.2f ms (%.2f Mprim/s)\n", buildTimeMs, Mprim);
+    printf("[Init] BLAS total SAH  = %.1f\n", bvhSAH);
+
+    fprintf(perfFile, "Initial BLAS build time: %.2f ms (%.2f Mprim/s)\n", buildTimeMs, Mprim);
+    fprintf(perfFile, "Initial BLAS total SAH: %.1f\n\n", bvhSAH);
+    fflush(perfFile); 
+
+    for (int i = 0; i < INSTANCE_AMOUNT; i++)
+        bvhInstance[i] = BVHInstance(bvh);
+
+    tlas = TLAS(bvhInstance, INSTANCE_AMOUNT);
+
+    position = new float3[INSTANCE_AMOUNT];
+    direction = new float3[INSTANCE_AMOUNT];
+    orientation = new float3[INSTANCE_AMOUNT];
+    // Use a fixed seed for reproducibility between builds
+    uint seed = 42;
+    for (int i = 0; i < INSTANCE_AMOUNT; i++)
+    {
+        position[i] = float3(RandomFloat(seed), RandomFloat(seed), RandomFloat(seed)) - 0.5f;
+        position[i] *= 4.0f;
+        direction[i] = normalize(position[i]) * 0.05f;
+        orientation[i] = float3(RandomFloat(seed), RandomFloat(seed), RandomFloat(seed)) * 2.5f;
+    }
 }
 
-void AllTogetherApp::Tick( float deltaTime )
+
+
+void AllTogetherApp::Tick(float deltaTime)
 {
-	// animate the scene
-	for( int i = 0; i < 256; i++ )
-	{
-		mat4 R = mat4::RotateX( orientation[i].x ) * 
-				 mat4::RotateY( orientation[i].y ) *
-				 mat4::RotateZ( orientation[i].z ) * mat4::Scale( 0.2f );
-		bvhInstance[i].SetTransform( mat4::Translate( position[i] ) * R );
-		position[i] += direction[i], orientation[i] += direction[i];
-		if (position[i].x < -3 || position[i].x > 3) direction[i].x *= -1;
-		if (position[i].y < -3 || position[i].y > 3) direction[i].y *= -1;
-		if (position[i].z < -3 || position[i].z > 3) direction[i].z *= -1;
-	}
-	// update the TLAS
-	Timer t;
-	tlas.Build();
-	float tlasTime = t.elapsed() * 1000;
-	// draw the scene
-	float3 p0( -1, 1, 2 ), p1( 1, 1, 2 ), p2( -1, -1, 2 );
+    static Timer globalTimer;
+    static float elapsedTime = 0;
+    static int   frameCount = 0;
+
+    for (int i = 0; i < INSTANCE_AMOUNT; i++)
+    {
+        mat4 R = mat4::RotateX(orientation[i].x) *
+                 mat4::RotateY(orientation[i].y) *
+                 mat4::RotateZ(orientation[i].z) *
+                 mat4::Scale(SCALING);
+        bvhInstance[i].SetTransform(mat4::Translate(position[i]) * R);
+        position[i] += direction[i];
+        orientation[i] += direction[i];
+        if (position[i].x < -3 || position[i].x > 3) direction[i].x *= -1;
+        if (position[i].y < -3 || position[i].y > 3) direction[i].y *= -1;
+        if (position[i].z < -3 || position[i].z > 3) direction[i].z *= -1;
+    }
+
+    Timer t;
+	// tlas.Build();
+    tlas.BuildWithBraiding();
+
+    float tlasTime = t.elapsed() * 1000.0f;
+    float tlasSAH = tlas.ComputeSAH();
+
+    Timer renderTimer;
+    float3 p0(-1, 1, 2), p1(1, 1, 2), p2(-1, -1, 2);
 #pragma omp parallel for schedule(dynamic)
-	for (int tile = 0; tile < (SCRWIDTH * SCRHEIGHT / 64); tile++)
-	{
-		int x = tile % (SCRWIDTH / 8), y = tile / (SCRWIDTH / 8);
-		Ray ray;
-		ray.O = float3( 0, 0, -6.5f );
-		for (int v = 0; v < 8; v++) for (int u = 0; u < 8; u++)
-		{
-			float3 pixelPos = ray.O + p0 +
-				(p1 - p0) * ((x * 8 + u) / (float)SCRWIDTH) +
-				(p2 - p0) * ((y * 8 + v) / (float)SCRHEIGHT);
-			ray.D = normalize( pixelPos - ray.O ), ray.t = 1e30f;
-			tlas.Intersect( ray );
-			uint c = ray.t < 1e30f ? (int)(255 / (1 + max( 0.f, ray.t - 4 ))) : 0;
-			screen->Plot( x * 8 + u, y * 8 + v, c * 0x10101 );
-		}
-	}
-	// report
-	float elapsed = t.elapsed() * 1000;
-	printf( "tlas build: %.2fms, tracing time: %.2fms (%5.2fK rays/s)\n", tlasTime, elapsed, sqr( 630 ) / elapsed );
+    for (int tile = 0; tile < (SCRWIDTH * SCRHEIGHT / 64); tile++)
+    {
+        int x = tile % (SCRWIDTH / 8);
+        int y = tile / (SCRWIDTH / 8);
+        Ray ray;
+        ray.O = float3(0, 0, -6.5f);
+        for (int v = 0; v < 8; v++)
+        for (int u = 0; u < 8; u++)
+        {
+            float3 pixelPos = ray.O + p0
+                + (p1 - p0) * ((x * 8 + u) / (float)SCRWIDTH)
+                + (p2 - p0) * ((y * 8 + v) / (float)SCRHEIGHT);
+            ray.D = normalize(pixelPos - ray.O);
+            ray.t = 1e30f;
+            tlas.Intersect(ray);
+            uint c = ray.t < 1e30f ? (int)(255 / (1 + max(0.f, ray.t - 4))) : 0;
+            screen->Plot(x * 8 + u, y * 8 + v, c * 0x10101);
+        }
+    }
+    float renderTimeMs = renderTimer.elapsed() * 1000.0f;
+
+    // Log stats for this frame
+    elapsedTime += renderTimeMs;
+    frameCount++;
+
+    float totalFrameTime = tlasTime + renderTimeMs;
+    float fps = (1000.0f / totalFrameTime);        
+    float kraysSec = (SCRWIDTH * SCRHEIGHT * 1e-3f) / (renderTimeMs * 1e-3f);
+
+    fprintf(perfFile,
+        "Frame %d: TLAS build = %.2f ms, SAH=%.1f, Rendering=%.2f ms, Total=%.2f ms, "
+        "FPS=%.2f, (%.2fK rays/s)\n",
+        frameCount, tlasTime, tlasSAH, renderTimeMs, totalFrameTime, fps, kraysSec);
+
+    if (globalTimer.elapsed() > RUN_TIME)
+    {
+        fclose(perfFile);
+        exit(0);
+    }
 }
 
 // EOF
