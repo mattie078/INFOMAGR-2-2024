@@ -6,4 +6,4 @@ This repository implements the "Improved Two-Level BVHs using Partial Re-Braidin
 
 ## Changes
 
-You can see the additions and changes in the following diff url: [Diff](https://github.com/mattie078/INFOMAGR-2-2024/compare/XXX..XXX)
+You can see the additions and changes in the following diff url: [Diff](https://github.com/mattie078/INFOMAGR-2-2024/compare/2ab78ac...7aa08de)
