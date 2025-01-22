@@ -6,9 +6,9 @@
 // bin count
 #define BINS 8
 #define INSTANCE_AMOUNT 512
-#define SCALING 0.25f
-
 #define MODEL_TRI_COUNT 30000
+#define SCALING 0.25f
+#define RUN_TIME 30.0f // seconds
 
 namespace Tmpl8
 {
